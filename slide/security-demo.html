@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MyLayak Security Architecture - 3B1B Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            color: #fff;
+            font-family: 'Computer Modern', 'Latin Modern Math', serif;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        #canvas-container {
+            /* Responsive sizing while maintaining 1000:600 (5:3) aspect ratio */
+            width: min(95vw, 95vh * 1.6667);
+            height: min(95vh, 95vw * 0.6);
+            
+            position: relative;
+            background: #000;
+            box-shadow: 0 0 20px rgba(255, 255, 255, 0.1);
+        }
+
+        svg {
+            width: 100%;
+            height: 100%;
+        }
+
+        .control-panel {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 20px;
+            z-index: 100;
+        }
+
+        button {
+            background: transparent;
+            border: 1px solid #444;
+            color: #888;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.3s;
+        }
+
+        button:hover {
+            border-color: #fff;
+            color: #fff;
+            box-shadow: 0 0 10px rgba(255,255,255,0.2);
+        }
+
+        /* 3B1B Style Elements */
+        .math-text {
+            font-size: 24px;
+            fill: #fff;
+            font-weight: 300;
+        }
+
+        .label-text {
+            font-size: 16px;
+            fill: #aaa;
+        }
+
+        .neon-blue { stroke: #00eeff; stroke-width: 2; fill: none; filter: drop-shadow(0 0 5px #00eeff); }
+        .neon-green { stroke: #00ff88; stroke-width: 2; fill: none; filter: drop-shadow(0 0 5px #00ff88); }
+        .neon-red { stroke: #ff3333; stroke-width: 2; fill: none; filter: drop-shadow(0 0 5px #ff3333); }
+        .neon-yellow { stroke: #ffff00; stroke-width: 2; fill: none; filter: drop-shadow(0 0 5px #ffff00); }
+        .neon-purple { stroke: #bd00ff; stroke-width: 2; fill: none; filter: drop-shadow(0 0 5px #bd00ff); }
+        
+        .box { stroke: #444; stroke-width: 2; fill: #111; }
+        .dashed { stroke-dasharray: 5,5; }
+        
+        .trust-boundary { stroke: #666; stroke-width: 2; stroke-dasharray: 10,10; fill: none; }
+
+        /* Animation Classes */
+        .draw-path {
+            stroke-dasharray: 1000;
+            stroke-dashoffset: 1000;
+            animation: draw 2s forwards ease-in-out;
+        }
+
+        .fade-in {
+            opacity: 0;
+            animation: fadeIn 1s forwards ease-in-out;
+        }
+        
+        .pulse-red {
+            animation: pulseRed 1s infinite;
+        }
+
+        @keyframes draw {
+            to { stroke-dashoffset: 0; }
+        }
+
+        @keyframes fadeIn {
+            to { opacity: 1; }
+        }
+        
+        @keyframes pulseRed {
+            0% { filter: drop-shadow(0 0 2px #ff3333); }
+            50% { filter: drop-shadow(0 0 10px #ff3333); }
+            100% { filter: drop-shadow(0 0 2px #ff3333); }
+        }
+
+        #scene-title {
+            position: absolute;
+            top: 8px;
+            left: 12px;
+            font-size: 32px;
+            color: #fff;
+            letter-spacing: 0.5px;
+            filter: drop-shadow(0 0 8px #ffffff);
+        }
+
+        .code-block {
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            fill: #00ff88;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container">
+        <div id="scene-title">1. Architecture Trust Map</div>
+        <svg id="main-svg" viewBox="0 0 1000 600"></svg>
+        
+        <div class="control-panel">
+            <button onclick="prevScene()">❮ Prev</button>
+            <button onclick="resetScene()">Replay</button>
+            <button onclick="nextScene()">Next ❯</button>
+        </div>
+    </div>
+
+    <script>
+        let currentScene = 0;
+        const totalScenes = 6;
+        const svg = document.getElementById('main-svg');
+        const title = document.getElementById('scene-title');
+
+        function setTitle(text) {
+            title.textContent = text;
+            title.classList.remove('fade-in');
+            void title.offsetWidth;
+            title.classList.add('fade-in');
+        }
+
+        // Helper to create SVG elements
+        function createEl(type, attrs) {
+            const el = document.createElementNS("http://www.w3.org/2000/svg", type);
+            for (const [key, value] of Object.entries(attrs)) {
+                if (key === 'text') el.textContent = value;
+                else el.setAttribute(key, value);
+            }
+            return el;
+        }
+
+        function clearSvg() {
+            while (svg.firstChild) svg.removeChild(svg.firstChild);
+        }
+
+        function drawBox(x, y, w, h, label, colorClass = 'box') {
+            const g = createEl('g', {});
+            const rect = createEl('rect', { x, y, width: w, height: h, rx: 5, class: colorClass });
+            const text = createEl('text', { x: x + w/2, y: y + h/2 + 5, 'text-anchor': 'middle', fill: '#fff', text: label, class: 'label-text' });
+            g.appendChild(rect);
+            g.appendChild(text);
+            svg.appendChild(g);
+            return g;
+        }
+        
+        function drawArrow(x1, y1, x2, y2, colorClass = 'neon-blue') {
+            const line = createEl('line', { x1, y1, x2, y2, class: `${colorClass} draw-path` });
+            // Arrowhead
+            const angle = Math.atan2(y2 - y1, x2 - x1);
+            const headLen = 10;
+            const h1x = x2 - headLen * Math.cos(angle - Math.PI / 6);
+            const h1y = y2 - headLen * Math.sin(angle - Math.PI / 6);
+            const h2x = x2 - headLen * Math.cos(angle + Math.PI / 6);
+            const h2y = y2 - headLen * Math.sin(angle + Math.PI / 6);
+            
+            const head = createEl('path', { d: `M${x2},${y2} L${h1x},${h1y} M${x2},${y2} L${h2x},${h2y}`, class: `${colorClass} draw-path` });
+            
+            svg.appendChild(line);
+            svg.appendChild(head);
+        }
+
+        // ================= SCENES =================
+
+        function scene1() {
+            setTitle("1. Trust Boundary Architecture");
+            clearSvg();
+
+            // --- Layout Constants ---
+            const zoneY = 60;
+            const zoneH = 480;
+            const untrustedX = 40;
+            const untrustedW = 280;
+            const trustedX = 360;
+            const trustedW = 600;
+            
+            // 1. Zones
+            // Untrusted Zone (Left)
+            const untrustedZone = createEl('rect', { x: untrustedX, y: zoneY, width: untrustedW, height: zoneH, fill: '#111', stroke: '#333', 'stroke-width': 2, 'stroke-dasharray': '5,5', rx: 10, class: 'fade-in' });
+            svg.appendChild(untrustedZone);
+            svg.appendChild(createEl('text', { x: untrustedX + untrustedW/2, y: zoneY - 10, text: "UNTRUSTED (Public/Client)", 'text-anchor': 'middle', fill: '#888', font_size: 16 }));
+
+            // Trusted Zone (Right)
+            const trustedZone = createEl('rect', { x: trustedX, y: zoneY, width: trustedW, height: zoneH, fill: '#0a0a0a', stroke: '#00ff88', 'stroke-width': 1, 'stroke-dasharray': '10,5', rx: 10, class: 'fade-in' });
+            svg.appendChild(trustedZone);
+            svg.appendChild(createEl('text', { x: trustedX + trustedW/2, y: zoneY - 10, text: "TRUSTED BACKEND (Secure)", 'text-anchor': 'middle', fill: '#00ff88', font_size: 16, font_weight: 'bold' }));
+
+            // 2. Components (Nodes)
+            // Untrusted Nodes
+            setTimeout(() => drawBox(untrustedX + 65, 180, 150, 70, "🖥️ Kiosk App", "box"), 200);
+            setTimeout(() => drawBox(untrustedX + 65, 320, 150, 70, "📷 QR Scanner", "box"), 400);
+
+            // Trusted Nodes
+            // Gateway (Entry)
+            const gateX = trustedX + 50;
+            setTimeout(() => drawBox(gateX, 250, 140, 80, "🚪 API Gateway", "neon-blue"), 600);
+
+            // Services (Logic)
+            const serviceX = trustedX + 250;
+            setTimeout(() => drawBox(serviceX, 150, 140, 70, "🎟️ Token Svc", "neon-yellow"), 800);
+            setTimeout(() => drawBox(serviceX, 350, 140, 70, "✅ QR Verifier", "neon-green"), 1000);
+
+            // Core Security (Vault)
+            const coreX = trustedX + 450;
+            setTimeout(() => {
+                // Visual grouping for Core
+                const coreGroup = createEl('rect', { x: coreX - 10, y: 130, width: 150, height: 320, fill: '#1a0033', stroke: 'none', rx: 10, opacity: 0.5 });
+                svg.appendChild(coreGroup);
+                
+                drawBox(coreX, 220, 130, 80, "🔑 KMS / HSM", "neon-purple");
+                drawBox(coreX, 380, 130, 60, "⚛️ Quantum", "neon-blue");
+                
+                svg.appendChild(createEl('text', { x: coreX + 65, y: 200, text: "Security Core", 'text-anchor': 'middle', fill: '#bd00ff', font_size: 12 }));
+            }, 1200);
+
+            // 3. Flows (Arrows)
+            const arrowColor = "neon-blue";
+            
+            // Ingress
+            setTimeout(() => drawArrow(untrustedX + 215, 215, gateX, 290, arrowColor), 1600); // Kiosk -> API
+            setTimeout(() => drawArrow(untrustedX + 215, 355, gateX, 290, arrowColor), 1800); // Scanner -> API
+            
+            // Distribution
+            setTimeout(() => drawArrow(gateX + 140, 290, serviceX, 185, arrowColor), 2000); // API -> Token
+            setTimeout(() => drawArrow(gateX + 140, 290, serviceX, 385, arrowColor), 2200); // API -> Verifier
+            
+            // Security Checks
+            setTimeout(() => drawArrow(serviceX + 140, 185, coreX, 260, "neon-purple"), 2400); // Token -> KMS
+            setTimeout(() => drawArrow(serviceX + 140, 385, coreX, 260, "neon-purple"), 2600); // Verifier -> KMS
+            
+            // Quantum Feed
+            setTimeout(() => drawArrow(coreX + 65, 380, coreX + 65, 330, "neon-blue"), 2800); // Quantum -> KMS
+        }
+
+        function scene2() {
+            setTitle("2. Server-Side Token Issuance (JWT)");
+            clearSvg();
+
+            // 1. Input Side (User Data)
+            setTimeout(() => {
+                const inputGroup = createEl('g', { class: 'fade-in' });
+                // Dashed box for input
+                inputGroup.appendChild(createEl('rect', { x: 50, y: 120, width: 220, height: 200, rx: 10, fill: 'none', stroke: '#444', 'stroke-dasharray': '5,5' }));
+                inputGroup.appendChild(createEl('text', { x: 160, y: 100, text: "Client Input", 'text-anchor': 'middle', fill: '#888' }));
+                
+                // Data items
+                inputGroup.appendChild(createEl('text', { x: 70, y: 160, text: "IC: 900101-14-xxxx", class: 'code-block', fill: '#fff' }));
+                inputGroup.appendChild(createEl('text', { x: 70, y: 190, text: "Income: B40", class: 'code-block', fill: '#00ff88' }));
+                inputGroup.appendChild(createEl('text', { x: 70, y: 220, text: "Status: Married", class: 'code-block', fill: '#00ff88' }));
+                inputGroup.appendChild(createEl('text', { x: 70, y: 250, text: "Age: 35", class: 'code-block', fill: '#00ff88' }));
+                inputGroup.appendChild(createEl('text', { x: 70, y: 280, text: "Gender: Male", class: 'code-block', fill: '#00ff88' }));
+                svg.appendChild(inputGroup);
+            }, 200);
+
+            // 2. Backend Container (Large & Structured)
+            const backendX = 400;
+            const backendY = 80;
+            const backendW = 550;
+            const backendH = 450;
+            
+            setTimeout(() => {
+                const backend = createEl('rect', { x: backendX, y: backendY, width: backendW, height: backendH, rx: 15, fill: '#111', stroke: '#666', 'stroke-width': 2, class: 'fade-in' });
+                svg.appendChild(backend);
+                svg.appendChild(createEl('text', { x: backendX + backendW/2, y: backendY - 15, text: "TRUSTED BACKEND (Token Service)", 'text-anchor': 'middle', fill: '#00ff88', font_size: 18 }));
+            }, 800);
+
+            // Arrow: Request
+            setTimeout(() => {
+                drawArrow(270, 220, backendX, 220, "neon-blue");
+                svg.appendChild(createEl('text', { x: 335, y: 200, text: "Request", 'text-anchor': 'middle', fill: '#00eeff', font_size: 12, class: 'fade-in' }));
+            }, 1200);
+
+            // 3. Payload Construction (Visual Transformation)
+            setTimeout(() => {
+                // Label
+                svg.appendChild(createEl('text', { x: backendX + 50, y: 140, text: "A. Construct Payload", fill: '#fff', font_size: 16 }));
+                
+                // JSON Paper/File
+                const jsonGroup = createEl('g', { transform: `translate(${backendX + 50}, 160)`, class: 'fade-in' });
+                jsonGroup.appendChild(createEl('rect', { width: 230, height: 120, fill: '#222', stroke: '#fff', rx: 5 }));
+                
+                // Content
+                jsonGroup.appendChild(createEl('text', { x: 10, y: 25, text: "{", class: 'code-block', fill: '#fff' }));
+                jsonGroup.appendChild(createEl('text', { x: 20, y: 45, text: '"sub": "hashed(IC)",', class: 'code-block', fill: '#aaa' }));
+                jsonGroup.appendChild(createEl('text', { x: 20, y: 65, text: '"attr": { "cat": "B40" },', class: 'code-block', fill: '#00ff88' }));
+                jsonGroup.appendChild(createEl('text', { x: 20, y: 85, text: '"exp": 1712345678,', class: 'code-block', fill: '#aaa' }));
+                jsonGroup.appendChild(createEl('text', { x: 10, y: 105, text: "}", class: 'code-block', fill: '#fff' }));
+                
+                svg.appendChild(jsonGroup);
+            }, 2000);
+
+            // 4. KMS Signing (Secure Box)
+            setTimeout(() => {
+                // KMS Box
+                const kmsX = backendX + 300;
+                const kmsY = 160;
+                const kmsGroup = createEl('g', { class: 'fade-in' });
+                
+                // Box with Neon Purple (Secure)
+                kmsGroup.appendChild(createEl('rect', { x: kmsX, y: kmsY, width: 180, height: 80, rx: 5, fill: '#1a0033', stroke: '#bd00ff', 'stroke-width': 2, filter: 'drop-shadow(0 0 5px #bd00ff)' }));
+                kmsGroup.appendChild(createEl('text', { x: kmsX + 90, y: kmsY + 30, text: "KMS / HSM", 'text-anchor': 'middle', fill: '#bd00ff', font_weight: 'bold' }));
+                kmsGroup.appendChild(createEl('text', { x: kmsX + 90, y: kmsY + 55, text: "🔒 SECRET_KEY", 'text-anchor': 'middle', fill: '#fff', font_size: 12 }));
+                
+                svg.appendChild(kmsGroup);
+                
+                // Signing Arrow
+                drawArrow(kmsX + 90, kmsY + 80, kmsX + 90, 300, "neon-purple");
+                svg.appendChild(createEl('text', { x: kmsX + 110, y: 290, text: "+ HMAC-SHA256", fill: '#bd00ff', font_size: 12 }));
+            }, 3000);
+
+            // 5. Assembly (Header + Payload + Sig)
+            setTimeout(() => {
+                svg.appendChild(createEl('text', { x: backendX + 50, y: 320, text: "B. Final Token Assembly", fill: '#fff', font_size: 16 }));
+                
+                // Payload Arrow down
+                drawArrow(backendX + 150, 280, backendX + 150, 350, "neon-blue");
+                
+                // Result Blocks
+                const resultY = 360;
+                const blockH = 40;
+                
+                // Header (Red)
+                const g1 = createEl('g', { class: 'fade-in' });
+                g1.appendChild(createEl('rect', { x: backendX + 50, y: resultY, width: 80, height: blockH, fill: '#330000', stroke: '#ff3333' }));
+                g1.appendChild(createEl('text', { x: backendX + 90, y: resultY + 25, text: "Header", 'text-anchor': 'middle', fill: '#ff3333', font_size: 12 }));
+                svg.appendChild(g1);
+                
+                // Payload (Green)
+                const g2 = createEl('g', { class: 'fade-in' });
+                g2.appendChild(createEl('rect', { x: backendX + 130, y: resultY, width: 120, height: blockH, fill: '#003300', stroke: '#00ff88' }));
+                g2.appendChild(createEl('text', { x: backendX + 190, y: resultY + 25, text: "Payload", 'text-anchor': 'middle', fill: '#00ff88', font_size: 12 }));
+                svg.appendChild(g2);
+                
+                // Signature (Purple)
+                const g3 = createEl('g', { class: 'fade-in' });
+                g3.appendChild(createEl('rect', { x: backendX + 250, y: resultY, width: 200, height: blockH, fill: '#1a0033', stroke: '#bd00ff' }));
+                g3.appendChild(createEl('text', { x: backendX + 350, y: resultY + 25, text: "Signature (HMAC)", 'text-anchor': 'middle', fill: '#bd00ff', font_size: 12 }));
+                svg.appendChild(g3);
+                
+                // Dots
+                svg.appendChild(createEl('circle', { cx: backendX + 130, cy: resultY + 20, r: 3, fill: '#fff' }));
+                svg.appendChild(createEl('circle', { cx: backendX + 250, cy: resultY + 20, r: 3, fill: '#fff' }));
+
+            }, 4000);
+
+            // 6. Output
+            setTimeout(() => {
+                svg.appendChild(createEl('text', { x: backendX + 275, y: 440, text: "JWT Ready for Client", 'text-anchor': 'middle', class: 'neon-yellow math-text fade-in' }));
+            }, 5000);
+        }
+
+        function scene3() {
+            setTitle("3. Pattern Obfuscation (Defense in Depth)");
+            clearSvg();
+
+            // Original JWT
+            const jwtGroup = createEl('g', { transform: 'translate(100, 250)' });
+            const jwtRect = createEl('rect', { width: 300, height: 60, fill: '#111', stroke: '#ffff00', 'stroke-width': 2 });
+            const jwtText = createEl('text', { x: 150, y: 35, text: "eyJhbGci... (Standard JWT)", 'text-anchor': 'middle', fill: '#ffff00' });
+            jwtGroup.appendChild(jwtRect);
+            jwtGroup.appendChild(jwtText);
+            svg.appendChild(jwtGroup);
+
+            // Arrow
+            setTimeout(() => drawArrow(410, 280, 550, 280, "neon-blue"), 1000);
+
+            // Process Box
+            setTimeout(() => {
+                drawBox(550, 230, 150, 100, "Obfuscator", "box");
+                svg.appendChild(createEl('text', { x: 625, y: 270, text: "XOR + ROT13", 'text-anchor': 'middle', fill: '#00eeff', font_size: "14" }));
+                svg.appendChild(createEl('text', { x: 625, y: 290, text: "(Pattern Hardening)", 'text-anchor': 'middle', fill: '#aaa', font_size: "12" }));
+            }, 1500);
+
+            // Result
+            setTimeout(() => {
+                drawArrow(700, 280, 800, 280, "neon-blue");
+                const resGroup = createEl('g', { transform: 'translate(800, 250)' });
+                const resRect = createEl('rect', { width: 150, height: 60, fill: '#111', stroke: '#00ff88', 'stroke-width': 2 });
+                const resText = createEl('text', { x: 75, y: 35, text: "X9z#kL2...", 'text-anchor': 'middle', fill: '#00ff88' });
+                resGroup.appendChild(resRect);
+                resGroup.appendChild(resText);
+                svg.appendChild(resGroup);
+            }, 2500);
+            
+            setTimeout(() => {
+                svg.appendChild(createEl('text', { x: 500, y: 500, text: "Note: Real security is the HMAC signature, this just stops casual scraping.", 'text-anchor': 'middle', fill: '#888' }));
+            }, 3500);
+        }
+
+        function scene4() {
+            setTitle("4. QR Steganography: Dual Layers");
+            clearSvg();
+
+            // QR Box
+            const qrX = 350, qrY = 150, qrSize = 300;
+            const qrRect = createEl('rect', { x: qrX, y: qrY, width: qrSize, height: qrSize, fill: 'none', stroke: '#fff', 'stroke-width': 4 });
+            svg.appendChild(qrRect);
+
+            // 1. Visible Layer
+            setTimeout(() => {
+                svg.appendChild(createEl('text', { x: 200, y: 200, text: "Layer 1: Visible", class: 'math-text', fill: '#fff' }));
+                svg.appendChild(createEl('text', { x: 200, y: 230, text: "Payload: SESSION=ABC", class: 'code-block' }));
+                // Draw some random 'pixels'
+                for(let i=0; i<20; i++) {
+                    let rx = qrX + Math.random() * (qrSize-20);
+                    let ry = qrY + Math.random() * (qrSize-20);
+                    svg.appendChild(createEl('rect', { x: rx, y: ry, width: 20, height: 20, fill: '#fff' }));
+                }
+            }, 500);
+
+            // 2. Hidden Layer (Stega)
+            setTimeout(() => {
+                svg.appendChild(createEl('text', { x: 800, y: 200, text: "Layer 2: Hidden", class: 'math-text', fill: '#00eeff' }));
+                svg.appendChild(createEl('text', { x: 800, y: 230, text: "LSB / Patterns", class: 'code-block', fill: '#00eeff' }));
+                svg.appendChild(createEl('text', { x: 800, y: 260, text: "Content: TS + MAC", class: 'code-block', fill: '#00eeff' }));
+                
+                // Draw faint blue dots
+                for(let i=0; i<30; i++) {
+                    let rx = qrX + Math.random() * (qrSize-10);
+                    let ry = qrY + Math.random() * (qrSize-10);
+                    svg.appendChild(createEl('circle', { cx: rx, cy: ry, r: 2, fill: '#00eeff', class: 'fade-in' }));
+                }
+            }, 2000);
+
+            // Formula
+            setTimeout(() => {
+                svg.appendChild(createEl('text', { x: 500, y: 500, text: "Hidden_Marker = HMAC(Secret, Payload + Timestamp)", 'text-anchor': 'middle', class: 'neon-green math-text fade-in' }));
+            }, 3500);
+        }
+
+        function scene5() {
+            setTitle("5. Attack Simulation: Replay/Forge");
+            clearSvg();
+
+            // Attacker
+            svg.appendChild(createEl('text', { x: 150, y: 100, text: "Attacker (Eve)", fill: '#ff3333', font_size: "24" }));
+            drawBox(50, 120, 200, 100, "", "neon-red");
+            svg.appendChild(createEl('text', { x: 150, y: 150, text: "Reads Visible Payload:", fill: '#ff3333', font_size: "14" }));
+            svg.appendChild(createEl('text', { x: 150, y: 170, text: "'SESSION=ABC'", class: 'code-block' }));
+
+            // Action: Regenerate
+            setTimeout(() => {
+                drawArrow(250, 170, 400, 170, "neon-red");
+                svg.appendChild(createEl('text', { x: 325, y: 160, text: "Generates New QR", fill: '#ff3333', font_size: "12" }));
+                
+                // Fake QR
+                drawBox(400, 120, 150, 150, "Fake QR", "box");
+            }, 1000);
+
+            // Verifier
+            setTimeout(() => {
+                drawBox(650, 120, 250, 300, "Backend Verifier", "neon-green");
+                drawArrow(550, 200, 650, 200);
+            }, 2000);
+
+            // Check Process
+            setTimeout(() => {
+                svg.appendChild(createEl('text', { x: 775, y: 200, text: "1. Read Visible: OK", fill: '#fff', font_size: "14" }));
+            }, 2500);
+
+            setTimeout(() => {
+                svg.appendChild(createEl('text', { x: 775, y: 240, text: "2. Extract Hidden: ???", fill: '#00eeff', font_size: "14" }));
+            }, 3000);
+
+            setTimeout(() => {
+                svg.appendChild(createEl('text', { x: 775, y: 280, text: "3. Verify MAC: FAIL", fill: '#ff3333', font_size: "14", font_weight: "bold" }));
+                svg.appendChild(createEl('text', { x: 775, y: 320, text: "(Attacker lacks Secret)", fill: '#aaa', font_size: "12" }));
+            }, 3500);
+
+            // Big X
+            setTimeout(() => {
+                const xGroup = createEl('g', { class: 'fade-in pulse-red' });
+                xGroup.appendChild(createEl('line', { x1: 420, y1: 140, x2: 530, y2: 250, stroke: '#ff0000', 'stroke-width': 10 }));
+                xGroup.appendChild(createEl('line', { x1: 530, y1: 140, x2: 420, y2: 250, stroke: '#ff0000', 'stroke-width': 10 }));
+                svg.appendChild(xGroup);
+                svg.appendChild(createEl('text', { x: 475, y: 300, text: "REJECTED", 'text-anchor': 'middle', fill: '#ff0000', font_size: "24" }));
+            }, 4000);
+        }
+
+        function scene6() {
+            setTitle("6. Quantum BB84 Key Refresh");
+            clearSvg();
+
+            // Alice & Bob
+            drawBox(50, 200, 100, 100, "Alice (QKD)", "neon-blue");
+            drawBox(850, 200, 100, 100, "Bob (QKD)", "neon-blue");
+
+            // Channel
+            const fiber = createEl('line', { x1: 150, y1: 250, x2: 850, y2: 250, stroke: '#444', 'stroke-width': 4 });
+            svg.appendChild(fiber);
+
+            // Simulation: Safe
+            setTimeout(() => {
+                svg.appendChild(createEl('text', { x: 500, y: 100, text: "Scenario A: No Eavesdropper", 'text-anchor': 'middle', fill: '#fff' }));
+                
+                // Photons
+                for(let i=0; i<5; i++) {
+                    setTimeout(() => {
+                        const c = createEl('circle', { cx: 150 + (i*150), cy: 250, r: 5, fill: '#00eeff', class: 'draw-path' });
+                        c.animate([{cx: 150}, {cx: 850}], {duration: 1000, fill: 'forwards'});
+                        svg.appendChild(c);
+                    }, i*200);
+                }
+            }, 500);
+
+            setTimeout(() => {
+                svg.appendChild(createEl('text', { x: 500, y: 300, text: "QBER ≈ 0% → Key Generated", 'text-anchor': 'middle', fill: '#00ff88' }));
+            }, 2000);
+
+            // Simulation: Attack
+            setTimeout(() => {
+                // Clear previous text
+                svg.appendChild(createEl('rect', { x: 300, y: 50, width: 400, height: 300, fill: '#000' })); // lazy clear
+                
+                svg.appendChild(createEl('text', { x: 500, y: 100, text: "Scenario B: Eve Intercepts", 'text-anchor': 'middle', fill: '#ff3333' }));
+                
+                // Eve Box
+                drawBox(450, 225, 100, 50, "Eve", "neon-red");
+                
+                // Photons Interrupted
+                for(let i=0; i<5; i++) {
+                    setTimeout(() => {
+                        const c = createEl('circle', { cx: 150, cy: 250, r: 5, fill: '#ff3333' });
+                        c.animate([{cx: 150}, {cx: 450}], {duration: 500, fill: 'forwards'}); // Stop at Eve
+                        svg.appendChild(c);
+                        
+                        // Resend distorted
+                        setTimeout(() => {
+                            const c2 = createEl('circle', { cx: 550, cy: 250, r: 5, fill: '#ffff00' }); // Distorted color
+                            c2.animate([{cx: 550}, {cx: 850}], {duration: 500, fill: 'forwards'});
+                            svg.appendChild(c2);
+                        }, 500);
+                    }, i*300);
+                }
+            }, 4000);
+
+            setTimeout(() => {
+                svg.appendChild(createEl('text', { x: 500, y: 350, text: "QBER > 25% → DETECTED! ABORT!", 'text-anchor': 'middle', fill: '#ff3333', font_weight: 'bold', class: 'pulse-red' }));
+            }, 6000);
+
+            // Final: Key Usage
+            setTimeout(() => {
+                svg.appendChild(createEl('text', { x: 500, y: 500, text: "Final: Use Derived Key to Refresh AES/HMAC Secrets", 'text-anchor': 'middle', fill: '#00ff88', class: 'fade-in' }));
+                drawArrow(500, 480, 500, 400, "neon-green"); // Pointing up to concept
+            }, 7500);
+        }
+
+
+        // ================= CONTROLLER =================
+
+        const scenes = [scene1, scene2, scene3, scene4, scene5, scene6];
+
+        function render() {
+            scenes[currentScene]();
+        }
+
+        function nextScene() {
+            if (currentScene < totalScenes - 1) {
+                currentScene++;
+                render();
+            }
+        }
+
+        function prevScene() {
+            if (currentScene > 0) {
+                currentScene--;
+                render();
+            }
+        }
+
+        function resetScene() {
+            render();
+        }
+
+        // Start
+        render();
+
+    </script>
+</body>
+</html>
