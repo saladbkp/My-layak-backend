@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>QR Stego Scanner</title>
+  <style>
+    body { margin:0; font-family:system-ui; background:#0b1220; color:#e5e7eb; }
+    .wrap { display:grid; grid-template-columns: 1fr 360px; gap:16px; padding:16px; }
+    .view { position:relative; background:#111827; border-radius:12px; overflow:hidden; }
+    video, canvas { width:100%; height:auto; display:block; }
+    canvas { position:absolute; left:0; top:0; }
+    .panel { background:#111827; border-radius:12px; padding:12px; }
+    pre { white-space:pre-wrap; word-break:break-word; margin:0; }
+    .ok { color:#22c55e; }
+    .bad { color:#ef4444; }
+    .warn{ color:#f59e0b; }
+    button { padding:10px 12px; border-radius:10px; border:0; background:#2563eb; color:white; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="view">
+      <video id="video" playsinline autoplay muted></video>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div class="panel">
+      <button id="startBtn">Start camera</button>
+      <div style="height:10px"></div>
+      <pre id="out">点击 Start camera（注意：必须 http://localhost 或 https 才能开摄像头）</pre>
+    </div>
+  </div>
+
+  <!-- jsQR CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+
+  <script>
+  // ======= CONFIG (与你的 generator/scanner 对齐) =======
+  const SECRET_TEXT = "CHANGE_ME_SECRET"; // 必须和 generate-qr.js 一致
+  const N = 37;
+  const BORDER = 4;
+  const HIDDEN_BITS = 64;
+  const TIME_WINDOW = 60;
+
+  // ======= Helpers: embed coords (同 generate-qr.js) =======
+  function getEmbedCoords() {
+    const n = 37;
+    const coords = [];
+    const bad = (x, y) =>
+      (x <= 8 && y <= 8) ||
+      (x >= n - 9 && y <= 8) ||
+      (x <= 8 && y >= n - 9) ||
+      x === 6 ||
+      y === 6 ||
+      (x >= 28 && x <= 32 && y >= 28 && y <= 32) ||
+      (y === 8 && (x <= 8 || x >= n - 8)) ||
+      (x === 8 && (y <= 8 || y >= n - 8));
+
+    for (let y = n - 1; y >= 0; y--) {
+      for (let x = n - 1; x >= 0; x--) {
+        if (bad(x, y)) continue;
+        coords.push([x, y]);
+        if (coords.length === HIDDEN_BITS) return coords;
+      }
+    }
+    throw new Error("Not enough coords");
+  }
+
+  function bitsToInt(bits) {
+    let v = 0 >>> 0;
+    for (const b of bits) v = ((v << 1) | (b & 1)) >>> 0;
+    return v >>> 0;
+  }
+
+  // ======= WebCrypto HMAC32 =======
+  const enc = new TextEncoder();
+  const secretBytes = enc.encode(SECRET_TEXT);
+  const keyPromise = crypto.subtle.importKey(
+    "raw",
+    secretBytes,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+
+  async function hmac32(msg) {
+    const key = await keyPromise;
+    const sig = await crypto.subtle.sign("HMAC", key, enc.encode(msg));
+    const dv = new DataView(sig);
+    return dv.getUint32(0, false); // big-endian
+  }
+
+  // ======= Homography solve (8x8 Gaussian elimination) =======
+  function solveLinearSystem8(A, b) {
+    // A: 8x8, b: 8
+    // augment
+    const M = A.map((row, i) => row.concat([b[i]]));
+    const n = 8;
+
+    for (let col = 0; col < n; col++) {
+      // pivot
+      let pivot = col;
+      for (let r = col + 1; r < n; r++) {
+        if (Math.abs(M[r][col]) > Math.abs(M[pivot][col])) pivot = r;
+      }
+      if (Math.abs(M[pivot][col]) < 1e-12) return null;
+      if (pivot !== col) [M[pivot], M[col]] = [M[col], M[pivot]];
+
+      // normalize
+      const div = M[col][col];
+      for (let c = col; c <= n; c++) M[col][c] /= div;
+
+      // eliminate
+      for (let r = 0; r < n; r++) {
+        if (r === col) continue;
+        const factor = M[r][col];
+        for (let c = col; c <= n; c++) M[r][c] -= factor * M[col][c];
+      }
+    }
+
+    return M.map(row => row[n]);
+  }
+
+  function computeHomography(srcCorners, dstCorners) {
+    // srcCorners: [{u,v} x4], dstCorners: [{x,y} x4]
+    // unknowns: h11,h12,h13,h21,h22,h23,h31,h32 (h33=1)
+    const A = [];
+    const b = [];
+    for (let i = 0; i < 4; i++) {
+      const {u, v} = srcCorners[i];
+      const {x, y} = dstCorners[i];
+
+      // eq for x
+      A.push([u, v, 1, 0, 0, 0, -x*u, -x*v]);
+      b.push(x);
+      // eq for y
+      A.push([0, 0, 0, u, v, 1, -y*u, -y*v]);
+      b.push(y);
+    }
+    const h = solveLinearSystem8(A, b);
+    if (!h) return null;
+
+    return {
+      h11: h[0], h12: h[1], h13: h[2],
+      h21: h[3], h22: h[4], h23: h[5],
+      h31: h[6], h32: h[7],
+      map(u, v) {
+        const den = this.h31*u + this.h32*v + 1;
+        return {
+          x: (this.h11*u + this.h12*v + this.h13) / den,
+          y: (this.h21*u + this.h22*v + this.h23) / den
+        };
+      }
+    };
+  }
+
+  function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+
+  function sampleDark(imgData, w, h, x, y) {
+    // 3x3 average luminance
+    let sum = 0, cnt = 0;
+    const xi = Math.round(x), yi = Math.round(y);
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const xx = clamp(xi + dx, 0, w - 1);
+        const yy = clamp(yi + dy, 0, h - 1);
+        const idx = (yy * w + xx) * 4;
+        const r = imgData.data[idx], g = imgData.data[idx+1], b = imgData.data[idx+2];
+        const lum = 0.299*r + 0.587*g + 0.114*b;
+        sum += lum; cnt++;
+      }
+    }
+    const avg = sum / cnt;
+    return avg < 128 ? 1 : 0;
+  }
+
+  async function tryExtractAndVerify(imgData, w, h, qr) {
+    const payload = qr.data;
+    const coords = getEmbedCoords();
+
+    // jsQR corners
+    const L = qr.location;
+    const dst = [
+      {x: L.topLeftCorner.x,     y: L.topLeftCorner.y},
+      {x: L.topRightCorner.x,    y: L.topRightCorner.y},
+      {x: L.bottomRightCorner.x, y: L.bottomRightCorner.y},
+      {x: L.bottomLeftCorner.x,  y: L.bottomLeftCorner.y},
+    ];
+
+    // 多尝试几种“角点是否包含 quiet zone / 角点是边界还是中心”的几何假设
+    const variants = [
+      {name:"noQZ-boundary",   S:N,               off:0,      center:0.5},
+      {name:"noQZ-centers",    S:N-1,             off:0,      center:0.0},
+      {name:"QZ-boundary",     S:N+2*BORDER,      off:BORDER, center:0.5},
+      {name:"QZ-centers",      S:N+2*BORDER-1,    off:BORDER, center:0.0},
+    ];
+
+    const now = Math.floor(Date.now()/1000);
+
+    for (const v of variants) {
+      const src = [
+        {u: 0,   v: 0},
+        {u: v.S, v: 0},
+        {u: v.S, v: v.S},
+        {u: 0,   v: v.S},
+      ];
+      const H = computeHomography(src, dst);
+      if (!H) continue;
+
+      const bits = coords.map(([mx, my]) => {
+        const u = (mx + v.off + v.center);
+        const vv = (my + v.off + v.center);
+        const p = H.map(u, vv);
+        return sampleDark(imgData, w, h, p.x, p.y);
+      });
+
+      const ts  = bitsToInt(bits.slice(0, 32));
+      const tag = bitsToInt(bits.slice(32));
+
+      const expected = await hmac32(`${payload}|${ts}`);
+
+      if (tag === expected) {
+        const diff = Math.abs(now - ts);
+        const okTime = diff <= TIME_WINDOW;
+        return {
+          payload, ts, tag, expected,
+          diff,
+          okStego: true,
+          okTime,
+          variant: v.name
+        };
+      }
+    }
+
+    return { payload, okStego:false };
+  }
+
+  // ======= Camera loop =======
+  const video = document.getElementById("video");
+  const overlay = document.getElementById("overlay");
+  const out = document.getElementById("out");
+  const startBtn = document.getElementById("startBtn");
+
+  let stream = null;
+  let running = false;
+
+  function drawBox(ctx, loc) {
+    const pts = [
+      loc.topLeftCorner,
+      loc.topRightCorner,
+      loc.bottomRightCorner,
+      loc.bottomLeftCorner,
+      loc.topLeftCorner,
+    ];
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = "#22c55e";
+    ctx.stroke();
+  }
+
+  startBtn.onclick = async () => {
+    if (running) return;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      running = true;
+
+      // 处理分辨率：用视频的实际尺寸
+      const w = video.videoWidth || 640;
+      const h = video.videoHeight || 480;
+      overlay.width = w;
+      overlay.height = h;
+
+      // 处理 canvas（离屏）
+      const proc = document.createElement("canvas");
+      proc.width = w;
+      proc.height = h;
+      const pctx = proc.getContext("2d", { willReadFrequently:true });
+      const octx = overlay.getContext("2d");
+
+      out.textContent = "📷 scanning...";
+
+      // 每 200ms 扫一次（避免 WebCrypto await 把帧率拖死）
+      setInterval(async () => {
+        if (!running) return;
+
+        pctx.drawImage(video, 0, 0, w, h);
+        const imgData = pctx.getImageData(0, 0, w, h);
+
+        const qr = jsQR(imgData.data, w, h, { inversionAttempts: "attemptBoth" });
+        octx.clearRect(0, 0, w, h);
+
+        if (!qr) {
+          out.textContent = "未检测到 QR...";
+          return;
+        }
+
+        drawBox(octx, qr.location);
+
+        const res = await tryExtractAndVerify(imgData, w, h, qr);
+        if (!res.okStego) {
+          out.innerHTML =
+            `payload: ${res.payload}\n` +
+            `\n❌ stego mismatch（这说明：不是你生成的，或透视采样失败）`;
+          return;
+        }
+
+        const status = res.okTime ? "✅ VALID" : "❌ INVALID: expired";
+        const cls = res.okTime ? "ok" : "bad";
+
+        out.innerHTML =
+          `payload: ${res.payload}\n` +
+          `variant: ${res.variant}\n` +
+          `timestamp: ${res.ts} (diff=${res.diff}s)\n` +
+          `tag: 0x${res.tag.toString(16)}\n` +
+          `expected: 0x${res.expected.toString(16)}\n` +
+          `\n<span class="${cls}">${status}</span>`;
+      }, 200);
+
+    } catch (e) {
+      out.innerHTML = `<span class="bad">开摄像头失败：</span>${e.message}`;
+    }
+  };
+  </script>
+</body>
+</html>
